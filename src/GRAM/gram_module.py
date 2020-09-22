@@ -3,7 +3,20 @@
 #################################################################
 import torch
 import torch.nn as nn
-import numpy as np
+from torch.nn import MultiLabelSoftMarginLoss
+
+
+class CrossEntropyLoss(nn.Module):
+    def __init__(self):
+        super(CrossEntropyLoss, self).__init__()
+
+    def forward(self, inputs, targets):
+        log_eps = 1e-8
+        cross_entropy = -(targets * torch.log(inputs + log_eps) +
+                          (1. - targets) * torch.log(1. - inputs + log_eps))
+        digits = cross_entropy.sum(axis=1)
+        loss = torch.mean(digits)
+        return loss
 
 
 class DAGAttention(nn.Module):
@@ -79,21 +92,20 @@ class GRUNet(nn.Module):
 
         out = torch.sigmoid(out)
         # out = torch.softmax(out, -1)
-        mask_t = torch.from_numpy(mask).to(self.device)
-        mask_t = mask_t.reshape((mask_t.size(0), mask_t.size(1), 1))
-        out = out * mask_t
+        mask = mask.unsqueeze(2)
+        out = out * mask
 
         # get last valid output
         batch_size, len_seqs, dim_size = out.shape[0], out.shape[1], out.shape[2]
         out_reshape = out.view(-1, out.shape[-1])
-        index_last_valid_output = [i * len_seqs + lengths[i] - 1 for i in range(batch_size)]
-        last_valid_output = out_reshape[index_last_valid_output]
-
+        index_last_valid_output = [(i * len_seqs + lengths[i] - 1).long() for i in range(batch_size)]
+        index_last_valid_output = torch.tensor(index_last_valid_output)
+        last_valid_output = out_reshape[index_last_valid_output, :]
         return out, h, last_valid_output
 
     def init_hidden(self, batch_size):
         weight = next(self.parameters()).data
-        hidden = weight.new(self.n_layers, batch_size, self.hidden_dim).zero_().to(self.device)
+        hidden = weight.new(self.n_layers, batch_size, self.hidden_dim).zero_()
         return hidden
 
 
@@ -123,7 +135,7 @@ class LSTMNet(nn.Module):
 
 class GRAM(nn.Module):
 
-    def __init__(self, leaves_list, ancestors_list, leaf_codes_num, internal_codes_num, emb_dim_size,
+    def __init__(self, leaves_list, ancestors_list, masks_list, leaf_codes_num, internal_codes_num, emb_dim_size,
                  attn_dim_size, rnn_dim_size, num_class, device):
         super(GRAM, self).__init__()
         self.leaf_codes_num = leaf_codes_num
@@ -133,35 +145,54 @@ class GRAM(nn.Module):
         self.rnn_dim_size = rnn_dim_size
         self.num_class = num_class
         self.device = device
+        self.leaves_list = leaves_list
+        self.ancestors_list = ancestors_list
+        self.masks_list = masks_list
 
-        # embedding for leaf codes and internal codes
-        self.embed_init = nn.Embedding(leaf_codes_num + internal_codes_num, emb_dim_size).to(device)
-        # DAG attention
-        self.dag_attention = DAGAttention(2*emb_dim_size, attn_dim_size).to(device)
         # GRU network
         self.gru = GRUNet(attn_dim_size, rnn_dim_size, num_class, 2, device)
+        # embedding for leaf codes and internal codes
+        self.embed_init = nn.Embedding(leaf_codes_num + internal_codes_num, emb_dim_size).to(device)
 
-        # Calculate the DAG Attention
-        attn_embed_list = []
-        for ls, ans in zip(leaves_list, ancestors_list):
-            ls = np.array(ls).astype(np.long)
-            ans = np.array(ans).astype(np.long)
+        # # DAG attention with 2D and mask
+        self.dag_attention = DAGAttention2D(2 * emb_dim_size, attn_dim_size).to(device)
+        # leaves_emb = self.embed_init(leaves_list)
+        # ancestors_emb = self.embed_init(ancestors_list)
+        # self.dag_emb = self.dag_attention(leaves_emb, ancestors_emb, masks_list)
 
-            leaves_emb = self.embed_init(torch.from_numpy(ls).to(device))
-            ancestors_emb = self.embed_init(torch.from_numpy(ans).to(device))
+        # # DAG attention
+        # self.dag_attention = DAGAttention(2*emb_dim_size, attn_dim_size).to(device)
+        # # Calculate the DAG Attention
+        # attn_embed_list = []
+        # for ls, ans in zip(leaves_list, ancestors_list):
+        #     ls = np.array(ls).astype(np.long)
+        #     ans = np.array(ans).astype(np.long)
+        #
+        #     leaves_emb = self.embed_init(torch.from_numpy(ls).to(device))
+        #     ancestors_emb = self.embed_init(torch.from_numpy(ans).to(device))
+        #
+        #     attn_embd = self.dag_attention(leaves_emb, ancestors_emb)
+        #     attn_embed_list.append(attn_embd)
+        #
+        # dag_emb = torch.cat(attn_embed_list, dim=-1)
+        # self.dag_emb = dag_emb.reshape((int(dag_emb.size()[0] / self.attn_dim_size), self.attn_dim_size))
 
-            attn_embd = self.dag_attention(leaves_emb, ancestors_emb)
-            attn_embed_list.append(attn_embd)
+    def forward(self, inputs, mask, lengths, labels=None):
 
-        dag_emb = torch.cat(attn_embed_list, dim=-1)
-        self.dag_emb = dag_emb.reshape((int(dag_emb.size()[0] / self.attn_dim_size), self.attn_dim_size))
+        leaves_emb = self.embed_init(self.leaves_list)
+        ancestors_emb = self.embed_init(self.ancestors_list)
+        dag_emb = self.dag_attention(leaves_emb, ancestors_emb, self.masks_list)
 
-    def forward(self, inputs, mask, lengths):
+        x = torch.tanh(torch.matmul(inputs, dag_emb))
+        h = self.gru.init_hidden(mask.shape[0])
+        out, h, valid_output = self.gru(x, h, mask, lengths)
 
-        x = torch.tanh(torch.matmul(inputs, self.dag_emb))
-        h = self.gru.init_hidden(mask.shape[0]).data
-        out, h, valid_output = self.gru(x.to(self.device).float(), h, mask, lengths)
-
+        # if labels is not None:
+        #     loss_fct = CrossEntropyLoss()
+        #     # loss_fct = MultiLabelSoftMarginLoss()
+        #     loss = loss_fct(valid_output, labels)
+        #     return loss
+        # else:
         return out, valid_output
 
 

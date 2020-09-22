@@ -2,6 +2,7 @@ from .modeling import BertModel, PreTrainedBertModel, TextCNN, \
     BertOnlyMLMHead, BertOnlyNSPHead
 from torch.nn import CrossEntropyLoss, MultiLabelSoftMarginLoss
 import torch.nn as nn
+import torch
 
 
 class KemceDxPrediction(PreTrainedBertModel):
@@ -33,10 +34,17 @@ class KemceDxPrediction(PreTrainedBertModel):
                                      output_all_encoded_layers=False)
 
         prediction_scores = self.classifier(pooled_output)
+        prediction_scores = torch.sigmoid(prediction_scores)
 
         if labels is not None:
-            loss_fct = MultiLabelSoftMarginLoss()
-            loss = loss_fct(prediction_scores.view(-1, self.num_labels), labels)
+            # loss_fct = MultiLabelSoftMarginLoss()
+            # loss = loss_fct(prediction_scores.view(-1, self.num_labels), labels)
+
+            logEps = 1e-8
+            cross_entropy = -(labels * torch.log(prediction_scores.view(-1, self.num_labels) + logEps) +
+                              (1. - labels) * torch.log(1. - prediction_scores.view(-1, self.num_labels) + logEps))
+            loglikelihood = cross_entropy.sum(axis=1)
+            loss = torch.mean(loglikelihood)
             return loss
         else:
             return prediction_scores

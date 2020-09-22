@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 import numpy as np
 from shutil import copyfile
 import torch
+import torch.optim as optim
 import pickle
 from KEMCE.knowledge_bert import SeqsTokenizer, EntityTokenizer, DescTokenizer, \
     KemceDxPrediction, BertAdam, BertConfig
@@ -203,25 +204,28 @@ def main():
         model = KemceDxPrediction(config)
     model.to(device)
 
-    # Prepare optimizer
-    param_optimizer = list(model.named_parameters())
-    no_linear = ['layer.11.output.dense_ent',
-                 'layer.11.output.LayerNorm_ent']
-    param_optimizer = [(n, p) for n, p in param_optimizer if not any(nl in n for nl in no_linear)]
+    # # Prepare optimizer
+    # param_optimizer = list(model.named_parameters())
+    # no_linear = ['layer.11.output.dense_ent',
+    #              'layer.11.output.LayerNorm_ent']
+    # param_optimizer = [(n, p) for n, p in param_optimizer if not any(nl in n for nl in no_linear)]
+    #
+    # no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight',
+    #             'LayerNorm_ent.bias', 'LayerNorm_ent.weight',
+    #             'LayerNorm_desc.bias', 'LayerNorm_desc.weight']
+    # optimizer_grouped_parameters = [
+    #     {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
+    #     {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+    #     ]
+    #
+    # t_total = num_train_steps
+    # optimizer = BertAdam(optimizer_grouped_parameters,
+    #                      lr=args.learning_rate,
+    #                      warmup=args.warmup_proportion,
+    #                      t_total=t_total)
 
-    no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight',
-                'LayerNorm_ent.bias', 'LayerNorm_ent.weight',
-                'LayerNorm_desc.bias', 'LayerNorm_desc.weight']
-    optimizer_grouped_parameters = [
-        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
-        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-        ]
-
-    t_total = num_train_steps
-    optimizer = BertAdam(optimizer_grouped_parameters,
-                         lr=args.learning_rate,
-                         warmup=args.warmup_proportion,
-                         t_total=t_total)
+    params_to_update = model.parameters()
+    optimizer = optim.Adadelta(params_to_update, lr=args.learning_rate)
 
     global_step = 0
     # if args.do_train:
@@ -272,6 +276,8 @@ def main():
                 input_mask = batch['mask_input']
                 label_task = batch['label_dx']
 
+                optimizer.step()
+
                 # forward
                 # track history if only in train
                 with torch.set_grad_enabled(phase == 'train'):
@@ -285,12 +291,13 @@ def main():
                                      input_mask,
                                      label_task)
                         loss.backward()
-                        optimizer.step()
-                        lr_this_step = args.learning_rate * warmup_linear(global_step / t_total, args.warmup_proportion)
-                        for param_group in optimizer.param_groups:
-                            param_group['lr'] = lr_this_step
-                        optimizer.zero_grad()
-                        global_step += 1
+
+                        # lr_this_step = args.learning_rate * warmup_linear(global_step / num_train_steps,
+                        #                                                   args.warmup_proportion)
+                        # for param_group in optimizer.param_groups:
+                        #     param_group['lr'] = lr_this_step
+                        # optimizer.zero_grad()
+                        # global_step += 1
 
                         fout.write("{}\n".format(loss.item()))
                         tr_loss += loss.item()

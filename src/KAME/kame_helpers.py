@@ -9,6 +9,7 @@ import pickle
 import numpy as np
 import time
 import copy
+from tqdm import tqdm, trange
 from GRAM.gram_helpers import print2file
 from KEMCE.utils.evaluation import PredictionEvaluation as eval
 
@@ -18,17 +19,19 @@ _VALIDATION_RATIO = 0.1
 
 def pad_matrix(seqs, ans_seqs, labels, num_leaf_code, num_class):
     lengths = np.array([len(seq) for seq in seqs]) - 1
+    n_samples = len(seqs)
+    maxlen = np.max(lengths)
+
     lengths_ans = []
     for seq in ans_seqs:
         for visit in seq:
             lengths_ans.append(len(visit))
     maxlen_ans = np.max(np.array(lengths_ans))
-    n_samples = len(seqs)
-    maxlen = np.max(lengths)
 
     x = np.zeros((n_samples, maxlen, num_leaf_code)).astype(np.float32)
     f = np.zeros((n_samples, maxlen, maxlen_ans)).astype(np.long)
     y = np.zeros((n_samples, maxlen, num_class)).astype(np.float32)
+    last_y = np.zeros((n_samples, num_class)).astype(np.float32)
     mask = np.zeros((n_samples, maxlen)).astype(np.float32)
 
     for idx, (seq, ans_seq, lseq) in enumerate(zip(seqs,ans_seqs,labels)):
@@ -39,9 +42,10 @@ def pad_matrix(seqs, ans_seqs, labels, num_leaf_code, num_class):
         for yvec, subseq in zip(y[idx, :, :], lseq[1:]):
             yvec[subseq] = 1.
         mask[idx, :lengths[idx]] = 1.
+        last_y[idx] = y[idx, lengths[idx] - 1, :]
 
     lengths = np.array(lengths, dtype=np.float32)
-    return x, f, y, mask, lengths
+    return x, f, y, mask, lengths, last_y
 
 
 def leaf2ancestors(tree_path):
@@ -119,7 +123,6 @@ def train_model(model, data_dict, optimizer, device, batch_size, num_epochs,
 
     val_loss_history = []
     best_model_wts = copy.deepcopy(model.state_dict())
-    best_loss = 1e+10
     best_accuracy_at_top_5 = 0
     epoch_duration = 0.0
 
@@ -138,7 +141,7 @@ def train_model(model, data_dict, optimizer, device, batch_size, num_epochs,
                 model.eval()  # Set model to evaluate mode
 
             running_loss = 0.0
-            precision_lst = []
+            precision_ls = []
             accuracy_ls = []
 
             data_set = data_dict[phase]
@@ -150,7 +153,7 @@ def train_model(model, data_dict, optimizer, device, batch_size, num_epochs,
                 batchX = data_set[0][index * batch_size:(index + 1) * batch_size]
                 batchF = data_set[1][index * batch_size:(index + 1) * batch_size]
                 batchY = data_set[2][index * batch_size:(index + 1) * batch_size]
-                x, f, y, mask, lengths = pad_matrix(batchX, batchF, batchY, num_leaves, num_classes)
+                x, f, y, mask, lengths, _ = pad_matrix(batchX, batchF, batchY, num_leaves, num_classes)
 
                 batch_x = torch.from_numpy(x).to(device)
                 batch_f = torch.from_numpy(f).to(device)
@@ -164,7 +167,7 @@ def train_model(model, data_dict, optimizer, device, batch_size, num_epochs,
                 # track history if only in utils
                 with torch.set_grad_enabled(phase == 'utils'):
                     # Get model outputs and calculate loss
-                    outputs = model(batch_x, batch_f, mask)
+                    outputs, _ = model(batch_x, batch_f, mask, lengths)
 
                     # Customise Loss function
                     logEps = 1e-8
@@ -186,15 +189,15 @@ def train_model(model, data_dict, optimizer, device, batch_size, num_epochs,
                 predicts = predicts.reshape(-1, predicts.shape[-1])
                 trues = trues.reshape(-1, trues.shape[-1])
 
-                # recalls = eval.visit_level_precision_at_k(trues, predicts)
+                precision = eval.visit_level_precision_at_k(trues, predicts)
                 accuracy = eval.code_level_accuracy_at_k(trues, predicts)
 
-                # precision_lst.append(recalls)
+                precision_ls.append(precision)
                 accuracy_ls.append(accuracy)
             duration = time.time() - start_time
             epoch_loss = running_loss / n_batches
 
-            # epoch_precision = (np.array(precision_lst)).mean(axis=0)
+            epoch_precision = (np.array(precision_ls)).mean(axis=0)
             epoch_accuracy = (np.array(accuracy_ls)).mean(axis=0)
 
             # buf = '{} {} Loss: {:.4f}, Duration: {}'.format(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()),
@@ -205,10 +208,13 @@ def train_model(model, data_dict, optimizer, device, batch_size, num_epochs,
                 phase, epoch_loss, epoch_accuracy, duration)
             print2file(buf, log_file)
 
+            buf = '{} {} Loss: {:.4f},Precision: {}, Duration: {}'.format(
+                time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()),
+                phase, epoch_loss, epoch_precision, duration)
+            print2file(buf, log_file)
+
             # deep copy the model
             if phase == 'val' and epoch_accuracy[0] > best_accuracy_at_top_5:
-            # if phase == 'val' and epoch_loss < best_loss:
-            #     best_loss = epoch_loss
                 best_accuracy_at_top_5 = epoch_accuracy[0]
                 best_model_wts = copy.deepcopy(model.state_dict())
             if phase == 'val':
@@ -216,26 +222,28 @@ def train_model(model, data_dict, optimizer, device, batch_size, num_epochs,
             if phase == 'utils':
                 epoch_duration += duration
 
-        model_epoch_path = model_path + '/mimic.kame_epoch(' + str(epoch) + ')_' + \
+        model_epoch_path = model_path + '/kame_epoch(' + str(epoch) + ')_' + \
                      time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime()) + '.model'
         buf = '{} Save the epoch({}) model to {}'.format(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()),
                                                          epoch, model_epoch_path)
         print2file(buf, log_file)
         torch.save(model, model_epoch_path)
 
-    buf = '{} Training complete in {:.0f}m {:.0f}s'.format(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()), epoch_duration // 60, epoch_duration % 60)
+    buf = '{} Training complete in {:.0f}m {:.0f}s'.format(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()),
+                                                           epoch_duration // 60, epoch_duration % 60)
     print2file(buf, log_file)
 
     # buf = '{} Best val Loss: {:4f}'.format(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()), best_loss)
     # print2file(buf, log_file)
 
-    buf = '{} Best accuracy at top 5: {:4f}'.format(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()), best_accuracy_at_top_5)
+    buf = '{} Best accuracy at top 5: {:4f}'.format(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()),
+                                                    best_accuracy_at_top_5)
     print2file(buf, log_file)
 
     # load best model weights
     model.load_state_dict(best_model_wts)
 
-    model_file = model_path + '/mimic.kame_' + str(num_epochs) + '_' + \
+    model_file = model_path + '/kame_' + str(num_epochs) + '_' + \
                  time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime()) + '.model'
     buf = '{} Save the best model to {}'.format(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()), model_file)
     print2file(buf, log_file)
@@ -244,76 +252,135 @@ def train_model(model, data_dict, optimizer, device, batch_size, num_epochs,
     return model, val_loss_history
 
 
-def eval_model(model, data_dict, device, batch_size, num_leaves, num_classes, log_file):
+def train_model_last_state(model, data_dict, optimizer, device, batch_size, num_epochs,
+                           num_leaves, num_classes, log_file, model_path):
 
     print2file('\n', log_file)
-    buf = '#####' * 10 + ' Testing model ' + '#####' * 10
+    buf = '#####' * 10 + ' Training model '+ '#####' * 10
     print2file(buf, log_file)
 
-    test_duration = 0.0
+    val_loss_history = []
+    best_model_wts = copy.deepcopy(model.state_dict())
+    best_accuracy_at_top_5 = 0
+    epoch_duration = 0.0
 
-    model.eval()  # Set model to evaluate mode
+    for epoch in trange(num_epochs, desc="Epoch"):
 
-    running_loss = 0.0
+        buf = '{} Epoch {}/{}'.format(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()), epoch, num_epochs - 1)
+        print2file(buf, log_file)
+        buf = '-' * 10
+        print2file(buf, log_file)
 
-    data_set = data_dict['test']
-    n_batches = int(np.ceil(float(len(data_set[0])) / float(batch_size)))
+        # Each epoch has a training and validation phase
+        for phase in ['utils', 'val', 'test']:
+            if phase == 'utils':
+                model.train()  # Set model to training mode
+            else:
+                model.eval()  # Set model to evaluate mode
 
-    start_time = time.time()
-    precision_lst = []
-    accuracy_ls = []
-    # Iterate over data.
-    for index in random.sample(range(n_batches), n_batches):
-        batchX = data_set[0][index * batch_size:(index + 1) * batch_size]
-        batchF = data_set[1][index * batch_size:(index + 1) * batch_size]
-        batchY = data_set[2][index * batch_size:(index + 1) * batch_size]
-        x, f, y, mask, lengths = pad_matrix(batchX, batchF, batchY, num_leaves, num_classes)
+            running_loss = 0.0
+            precision_ls = []
+            accuracy_ls = []
 
-        batch_x = torch.from_numpy(x).to(device)
-        batch_f = torch.from_numpy(f).to(device)
-        batch_y = torch.from_numpy(y).to(device)
-        lengths = torch.from_numpy(lengths).to(device)
+            data_set = data_dict[phase]
+            n_batches = int(np.ceil(float(len(data_set[0])) / float(batch_size)))
 
-        # forward
-        # track history if only in utils
-        with torch.set_grad_enabled(False):
-            # Get model outputs and calculate loss
-            outputs = model(batch_x, batch_f, mask)
+            start_time = time.time()
+            # Iterate over data.
+            for index in tqdm(random.sample(range(n_batches), n_batches), desc="Iteration"):
+                batchX = data_set[0][index * batch_size:(index + 1) * batch_size]
+                batchF = data_set[1][index * batch_size:(index + 1) * batch_size]
+                batchY = data_set[2][index * batch_size:(index + 1) * batch_size]
+                x, f, y, mask, lengths, last_y = pad_matrix(batchX, batchF, batchY, num_leaves, num_classes)
 
-            # Customise Loss function
-            logEps = 1e-8
-            cross_entropy = -(batch_y * torch.log(outputs + logEps) +
-                              (1. - batch_y) * torch.log(1. - outputs + logEps))
-            loglikelihood = cross_entropy.sum(axis=2).sum(axis=1) / lengths
-            loss = torch.mean(loglikelihood)
+                batch_x = torch.from_numpy(x).to(device)
+                batch_f = torch.from_numpy(f).to(device)
+                batch_y = torch.from_numpy(last_y).to(device)
+                lengths = torch.from_numpy(lengths).to(device)
 
-            predicts = outputs.cpu().numpy()
-            trues = batch_y.cpu().numpy()
-            predicts = predicts.reshape(-1, predicts.shape[-1])
-            trues = trues.reshape(-1, trues.shape[-1])
+                # zero the parameter gradients
+                optimizer.zero_grad()
 
-            recalls = eval.visit_level_precision_at_k(trues, predicts)
-            accuracys = eval.code_level_accuracy_at_k(trues, predicts)
+                # forward
+                # track history if only in utils
+                with torch.set_grad_enabled(phase == 'utils'):
+                    # Get model outputs and calculate loss
+                    _, outputs = model(batch_x, batch_f, mask, lengths)
 
-            precision_lst.append(recalls)
-            accuracy_ls.append(accuracys)
-        # statistics
-        running_loss += loss.item()
+                    # Customise Loss function
+                    logEps = 1e-8
+                    cross_entropy = -(batch_y * torch.log(outputs + logEps) +
+                                      (1. - batch_y) * torch.log(1. - outputs + logEps))
+                    loglikelihood = cross_entropy.sum(axis=1)
+                    loss = torch.mean(loglikelihood)
 
-    duration = time.time() - start_time
-    test_loss = running_loss / n_batches
-    final_recall = (np.array(precision_lst)).mean(axis=0)
-    final_accuracy = (np.array(accuracy_ls)).mean(axis=0)
+                    # backward + optimize only if in training phase
+                    if phase == 'utils':
+                        loss.backward(retain_graph=True)
+                        # loss.backward()
+                        optimizer.step()
 
-    buf = '{} Testing complete in {:.0f}m {:.0f}s'.format(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()),
-                                                          duration // 60, duration % 60)
+                # statistics
+                running_loss += loss.item()
+                predicts = outputs.cpu().detach().numpy()
+                trues = batch_y.cpu().numpy()
+                predicts = predicts.reshape(-1, predicts.shape[-1])
+                trues = trues.reshape(-1, trues.shape[-1])
+
+                precision = eval.visit_level_precision_at_k(trues, predicts)
+                accuracy = eval.code_level_accuracy_at_k(trues, predicts)
+
+                precision_ls.append(precision)
+                accuracy_ls.append(accuracy)
+            duration = time.time() - start_time
+            epoch_loss = running_loss / n_batches
+
+            epoch_precision = (np.array(precision_ls)).mean(axis=0)
+            epoch_accuracy = (np.array(accuracy_ls)).mean(axis=0)
+
+            buf = '{} {} Loss: {:.4f},Accuracy: {}, Duration: {}'.format(
+                time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()),
+                phase, epoch_loss, epoch_accuracy, duration)
+            print2file(buf, log_file)
+
+            buf = '{} {} Loss: {:.4f},Precision: {}, Duration: {}'.format(
+                time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()),
+                phase, epoch_loss, epoch_precision, duration)
+            print2file(buf, log_file)
+
+            # deep copy the model
+            if phase == 'val' and epoch_accuracy[0] > best_accuracy_at_top_5:
+                best_accuracy_at_top_5 = epoch_accuracy[0]
+                best_model_wts = copy.deepcopy(model.state_dict())
+            if phase == 'val':
+                val_loss_history.append(epoch_loss)
+            if phase == 'utils':
+                epoch_duration += duration
+
+        model_epoch_path = model_path + '/kame_epoch(' + str(epoch) + ')_' + \
+                     time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime()) + '.model'
+        buf = '{} Save the epoch({}) model to {}'.format(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()),
+                                                         epoch, model_epoch_path)
+        print2file(buf, log_file)
+        torch.save(model, model_epoch_path)
+
+    buf = '{} Training complete in {:.0f}m {:.0f}s'.format(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()),
+                                                           epoch_duration // 60, epoch_duration % 60)
     print2file(buf, log_file)
 
-    buf = '{} test Loss: {:4f}'.format(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()), test_loss)
+    buf = '{} Best accuracy at top 5: {:4f}'.format(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()),
+                                                    best_accuracy_at_top_5)
     print2file(buf, log_file)
-    buf = '{} Precision: {}'.format(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()), final_recall)
+
+    # load best model weights
+    model.load_state_dict(best_model_wts)
+
+    model_file = model_path + '/kame_' + str(num_epochs) + '_' + \
+                 time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime()) + '.model'
+    buf = '{} Save the best model to {}'.format(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()), model_file)
     print2file(buf, log_file)
-    buf = '{} Accuracy: {}'.format(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()), final_accuracy)
-    print2file(buf, log_file)
+    torch.save(model, model_file)
+
+    return model, val_loss_history
 
 

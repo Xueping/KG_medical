@@ -15,6 +15,7 @@ class DiagnosisPrediction(nn.Module):
     def __init__(self, config):
         super(DiagnosisPrediction, self).__init__()
         self.config = config
+        self.lamda = config.lamda
         self.hidden_size = config.hidden_size
         self.num_labels = config.num_ccs_classes
 
@@ -23,11 +24,13 @@ class DiagnosisPrediction(nn.Module):
 
         self.visit_pooling = AttentionPooling(config)
         self.patient_pooling = AttentionPooling(config)
+        self.dag_pooling = AttentionPooling(config)
 
         self.position_embedding = PositionEmbeddings(config)
 
         # self.text_cnn = TextCNN(config)
         self.classifier = nn.Linear(config.hidden_size, self.num_labels)
+        self.classifier_visit = nn.Linear(config.hidden_size, config.num_visit_classes)
 
         # embedding for leaf codes and internal codes
         # print('Add dag!----------------------')
@@ -56,8 +59,12 @@ class DiagnosisPrediction(nn.Module):
                 input_ids,
                 visit_mask=None,
                 code_mask=None,
-                labels=None):
+                labels=None,
+                labels_visit=None
+                ):
 
+        lengths = visit_mask.sum(axis=-1)
+        # print(lengths)
         input_tensor = self.embed_inputs(input_ids)  # bs, visit_len, code_len, embedding_dim
         input_shape = input_tensor.shape
         inputs = input_tensor.view(-1, input_shape[2], input_shape[3])  # bs * visit_len, code_len, embedding_dim
@@ -70,14 +77,17 @@ class DiagnosisPrediction(nn.Module):
         extended_attention_mask = inputs_mask.unsqueeze(1).unsqueeze(2)  # bs * visit_len,1,1 code_len
         extended_attention_mask = extended_attention_mask.to(dtype=next(self.parameters()).dtype)  # fp16 compatibility
         extended_attention_mask = (1.0 - extended_attention_mask) * VERY_NEGATIVE_NUMBER
-        visit_outputs = self.encoder_visit(inputs, extended_attention_mask,
-                                           inputs_dag, output_all_encoded_layers=False)
+        visit_outputs, dag_outputs = self.encoder_visit(inputs, extended_attention_mask,
+                                                        inputs_dag, output_all_encoded_layers=False)
 
         attention_mask = inputs_mask.unsqueeze(2)  # bs * visit_len,code_len,1
         attention_mask = attention_mask.to(dtype=next(self.parameters()).dtype)  # fp16 compatibility
         attention_mask = (1.0 - attention_mask) * VERY_NEGATIVE_NUMBER
         visit_pooling = self.visit_pooling(visit_outputs[-1], attention_mask)
         visit_outs = visit_pooling.view(-1, input_shape[1], input_shape[3])  # bs, visit_len, embedding_dim
+
+        dag_pooling = self.dag_pooling(dag_outputs[-1], attention_mask)
+        dag_outs = dag_pooling.view(-1, input_shape[1], input_shape[3])  # bs, visit_len, embedding_dim
 
         # add position embedding
         visit_outs = self.position_embedding(visit_outs)
@@ -95,6 +105,9 @@ class DiagnosisPrediction(nn.Module):
         prediction_scores = self.classifier(patient_pooling)
         prediction_scores = torch.sigmoid(prediction_scores)
 
+        prediction_scores_visit = self.classifier_visit(dag_outs)
+        prediction_scores_visit = torch.sigmoid(prediction_scores_visit)
+
         if labels is not None:
             # loss_fct = MultiLabelSoftMarginLoss()
             # loss = loss_fct(prediction_scores.view(-1, self.num_labels), labels)
@@ -104,7 +117,12 @@ class DiagnosisPrediction(nn.Module):
             loglikelihood = cross_entropy.sum(axis=1)
             loss = torch.mean(loglikelihood)
 
-            return loss
+            cross_entropy_visit = -(labels_visit * torch.log(prediction_scores_visit + logEps) +
+                              (1. - labels_visit) * torch.log(1. - prediction_scores_visit + logEps))
+            loglikelihood_visit = cross_entropy_visit.sum(axis=2).sum(axis=1) / lengths
+            loss_visit = torch.mean(loglikelihood_visit)
+            total_loss = loss + self.lamda * loss_visit
+            return total_loss
         else:
             return prediction_scores
 

@@ -83,6 +83,7 @@ def mimic_processing_for_readm_dx(adm_file, dx_file, single_dx_file, multi_dx_fi
     admDxMap = {}
     admDxMap_3digit = {}
     admDxMap_ccs = {}
+    admDxMap_ccs_cat1 = {}
     infd = open(dx_file, 'r')
     infd.readline()
     for line in infd:
@@ -95,6 +96,7 @@ def mimic_processing_for_readm_dx(adm_file, dx_file, single_dx_file, multi_dx_fi
         dxStr = 'D_' + dx
         dxStr_3digit = 'D_' + convert_to_3digit_icd9(dx)
         dxStr_ccs_single = 'D_' + label4data.code2single_dx[dx]
+        dxStr_ccs_cat1 = 'D_' + label4data.code2first_level_dx[dx]
 
         if admId in admDxMap:
             admDxMap[admId].append(dxStr)
@@ -110,12 +112,18 @@ def mimic_processing_for_readm_dx(adm_file, dx_file, single_dx_file, multi_dx_fi
             admDxMap_ccs[admId].append(dxStr_ccs_single)
         else:
             admDxMap_ccs[admId] = [dxStr_ccs_single]
+
+        if admId in admDxMap_ccs_cat1:
+            admDxMap_ccs_cat1[admId].append(dxStr_ccs_cat1)
+        else:
+            admDxMap_ccs_cat1[admId] = [dxStr_ccs_cat1]
     infd.close()
 
     print('Building pid-sortedVisits mapping')
     pidSeqMap = {}
     pidSeqMap_3digit = {}
     pidSeqMap_ccs = {}
+    pidSeqMap_ccs_cat1 = {}
     for pid, admIdList in pidAdmMap.items():
         new_admIdList = []
         for admId in admIdList:
@@ -131,6 +139,9 @@ def mimic_processing_for_readm_dx(adm_file, dx_file, single_dx_file, multi_dx_fi
 
         sortedList_ccs = sorted([(admDateMap[admId], admDxMap_ccs[admId]) for admId in new_admIdList])
         pidSeqMap_ccs[pid] = sortedList_ccs
+
+        sortedList_ccs_cat1 = sorted([(admDateMap[admId], admDxMap_ccs_cat1[admId]) for admId in new_admIdList])
+        pidSeqMap_ccs_cat1[pid] = sortedList_ccs_cat1
 
     print('Building strSeqs, span label')
     seqs = []
@@ -197,38 +208,76 @@ def mimic_processing_for_readm_dx(adm_file, dx_file, single_dx_file, multi_dx_fi
             newPatient.append(newVisit)
         newSeqs_ccs.append(newPatient)
 
-    print('Converting seqs to BERT inputs')
+    print('Building strSeqs for CCS multi-level first code')
+    seqs_ccs_cat1 = []
+    for pid, visits in pidSeqMap_ccs_cat1.items():
+        seq = []
+        for visit in visits:
+            seq.append(visit[1])
+        seqs_ccs_cat1.append(seq)
 
+    print('Converting strSeqs to intSeqs, and making types for ccs multi-level first level code')
+    dict_ccs_cat1 = {}
+    newSeqs_ccs_cat1 = []
+    for patient in seqs_ccs_cat1:
+        newPatient = []
+        for visit in patient:
+            newVisit = []
+            for code in set(visit):
+                if code in dict_ccs_cat1:
+                    newVisit.append(dict_ccs_cat1[code])
+                else:
+                    dict_ccs_cat1[code] = len(dict_ccs_cat1)
+                    newVisit.append(dict_ccs_cat1[code])
+            newPatient.append(newVisit)
+        newSeqs_ccs_cat1.append(newPatient)
+
+    print('Converting seqs to model inputs')
     inputs_all = []
     labels_all = []
+    labels_ccs = []
+    labels_current_visit = []
+    labels_next_visit = []
+    labels_visit_cat1 = []
     vocab_set = {}
     max_visit_len = 0
     max_seqs_len = 0
+    truncated_len = 21
     for i, seq in enumerate(seqs):
-        # length = len(seq)
-        # if length >= 11:
-        #     last_seqs = seq[length-11:]
-        #     last_spans = seqs_span[i][length-11:]
-        #     last_seq_3digit = newSeqs_3digit[i][length-11:]
-        #     last_seq_ccs = newSeqs_ccs[i][length-11:]
-        # else:
-        #     last_seqs = seq
-        #     last_spans = seqs_span[i]
-        #     last_seq_3digit = newSeqs_3digit[i]
-        #     last_seq_ccs = newSeqs_ccs[i]
+        length = len(seq)
 
-        last_seqs = seq
-        last_spans = seqs_span[i]
-        last_seq_3digit = newSeqs_3digit[i]
-        last_seq_ccs = newSeqs_ccs[i]
+        if length >= truncated_len:
+            last_seqs = seq[length-truncated_len:]
+            last_spans = seqs_span[i][length-truncated_len:]
+            last_seq_3digit = newSeqs_3digit[i][length-truncated_len:]
+            last_seq_ccs = newSeqs_ccs[i][length-truncated_len:]
+            last_seq_ccs_cat1 = newSeqs_ccs_cat1[i][length-truncated_len:]
+        else:
+            last_seqs = seq
+            last_spans = seqs_span[i]
+            last_seq_3digit = newSeqs_3digit[i]
+            last_seq_ccs = newSeqs_ccs[i]
+            last_seq_ccs_cat1 = newSeqs_ccs_cat1[i]
+
+        # last_seqs = seq
+        # last_spans = seqs_span[i]
+        # last_seq_3digit = newSeqs_3digit[i]
+        # last_seq_ccs = newSeqs_ccs[i]
+        # last_seq_ccs_cat1 = newSeqs_ccs_cat1[i]
 
         valid_seq = last_seqs[:-1]
         label_span = last_spans[-1]
         label_3digit = last_seq_3digit[-1]
         label_ccs = last_seq_ccs[-1]
+        label_current_visit = last_seq_ccs[:-1]
+        label_next_visit = last_seq_ccs[1:]
 
+        labels_current_visit.append(label_current_visit)
+        labels_next_visit.append(label_next_visit)
+        labels_visit_cat1.append(last_seq_ccs_cat1[:-1])
         inputs_all.append(valid_seq)
         labels_all.append([label_span, label_3digit, label_ccs])
+        labels_ccs.append((label_ccs))
 
         if len(valid_seq) > max_seqs_len:
             max_seqs_len = len(valid_seq)
@@ -245,14 +294,19 @@ def mimic_processing_for_readm_dx(adm_file, dx_file, single_dx_file, multi_dx_fi
     sorted_vocab = {k: v for k, v in sorted(vocab_set.items(), key=lambda item: item[1], reverse=True)}
     pickle.dump(inputs_all, open(out_file + '.inputs_all.seqs', 'wb'), -1)
     pickle.dump(labels_all, open(out_file + '.labels_all.label', 'wb'), -1)
+    pickle.dump(labels_ccs, open(out_file + '.labels_ccs.label', 'wb'), -1)
+    pickle.dump(labels_current_visit, open(out_file + '.labels_current_visit.label', 'wb'), -1)
+    pickle.dump(labels_next_visit, open(out_file + '.labels_next_visit.label', 'wb'), -1)
+    pickle.dump(labels_visit_cat1, open(out_file + '.labels_visit_cat1.label', 'wb'), -1)
     pickle.dump(dict_3digit, open(out_file + '.3digitICD9.dict', 'wb'), -1)
     pickle.dump(dict_ccs, open(out_file + '.ccs_single_level.dict', 'wb'), -1)
+    pickle.dump(dict_ccs_cat1, open(out_file + '.ccs_cat1.dict', 'wb'), -1)
     outfd = open(out_file + '.vocab.txt', 'w')
     for k, v in sorted_vocab.items():
         outfd.write(k + '\n')
     outfd.close()
     print(max_visit_len, max_seqs_len, len(dict_ccs), len(dict_3digit),
-          len(inputs_all), len(labels_all), len(sorted_vocab))
+          len(inputs_all), len(labels_all), len(sorted_vocab), len(dict_ccs_cat1))
 
 
 if __name__ == '__main__':

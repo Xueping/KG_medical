@@ -480,17 +480,15 @@ class BertEncoderDag(nn.Module):
 
     def forward(self, hidden_states, attention_mask, dag_inputs, output_all_encoded_layers=True):
         all_encoder_layers = []
+        all_encoder_dags = []
 
         for layer_module in self.layer:
             hidden_states, dag_inputs = layer_module(hidden_states, attention_mask, dag_inputs)
             if output_all_encoded_layers:
                 all_encoder_layers.append(hidden_states)
+                all_encoder_dags.append(dag_inputs)
         if not output_all_encoded_layers:
             all_encoder_layers.append(hidden_states)
-        return all_encoder_layers
-
-
-
-
-
+            all_encoder_dags.append(dag_inputs)
+        return all_encoder_layers, all_encoder_dags
 

@@ -2,6 +2,8 @@ from datetime import datetime
 import pickle
 from GRAM.gram_helpers import convert_to_icd9, convert_to_3digit_icd9
 from KEMCE.dataset import LabelsForData
+import pandas as pd
+import argparse
 
 
 def mimic_processing(adm_file, dx_file, multi_dx_file, single_dx_file, out_file):
@@ -172,15 +174,181 @@ def mimic_processing(adm_file, dx_file, multi_dx_file, single_dx_file, out_file)
     print(len(newSeqs),len(types), len(types_3digit), len(dict_ccs))
 
 
-if __name__ == '__main__':
-    dir_path = '../../'
+def eicu_processing(pats_file, dx_file, multi_dx_file, single_dx_file, out_file):
+    dxes = pd.read_csv(dx_file, header=0)
+    pats = pd.read_csv(pats_file, header=0)
+    label4data = LabelsForData(multi_dx_file, single_dx_file)
 
-    admissionFile = dir_path + '../../../medicalAI_V2/dataset/mimic3/ADMISSIONS.csv'
-    diagnosisFile = dir_path+ '../../../medicalAI_V2/dataset/mimic3/DIAGNOSES_ICD.csv'
-    # outFile = dir_path + 'outputs/kame/data/mimic'
-    # outFile = dir_path + 'outputs/gram/data/mimic/mimic'
-    outFile = dir_path + 'outputs/kemce/data/mimic'
+    # unique patient:count
+    pat_vc = pats.uniquepid.value_counts()
+
+    # patients whose admission number is at least 2
+    pat_two_plus = pat_vc[pat_vc > 1].index.tolist()
+
+    # pid mapping admission list
+    print('pid mapping admission list')
+    pid_adm_map = {}
+    for pid in pat_two_plus:
+        pats_adm = pats[pats.uniquepid == pid]
+        sorted_adms = pats_adm.sort_values(by=['hospitaldischargeyear', 'hospitaladmitoffset'],
+                                           ascending=[True, False])['patientunitstayid'].tolist()
+        pid_adm_map[pid] = sorted_adms
+
+    # filter null in icc9code field
+    dxes = dxes[dxes.icd9code.notnull()]
+
+    # Building Building strSeqs
+    print('Building Building strSeqs')
+    seqs = []
+    for pid, adms in pid_adm_map.items():
+        seq = []
+        for adm in adms:
+            code_list = []
+            diags = dxes[dxes.patientunitstayid == adm]
+            for index, row in diags.iterrows():
+                codes = row.icd9code.split(',')
+                if len(codes) == 2:
+                    # if the first letter is digit, it is icd9 code
+                    if codes[0][0].isdigit():
+                        code_list.append(codes[0].replace('.', ''))
+                    if codes[1][0].isdigit():
+                        code_list.append(codes[0].replace('.', ''))
+                else:
+                    if codes[0][0].isdigit():
+                        code_list.append(codes[0].replace('.', ''))
+            if len(code_list) > 0:
+                seq.append(code_list)
+        if len(seq) > 1:
+            seqs.append(seq)
+
+    # Building Building new strSeqs, which filters the admission with only one diagnosis code
+    print('Building Building new strSeqs, which filters the admission with only one diagnosis code')
+    new_seqs = []
+    for seq in seqs:
+        new_seq = []
+        for adm in seq:
+            if len(adm) == 1:
+                continue
+            else:
+                code_set = set(adm)
+                if len(code_set) == 1:
+                    continue
+                else:
+                    new_seq.append(list(code_set))
+        if len(new_seq) > 1:
+            new_seqs.append(new_seq)
+
+    # Building Building strSeqs, and string labels
+    print('Building Building strSeqs, and string labels')
+    new_seqs_str = []
+    adm_dx_ccs = []
+    adm_dx_ccs_cat1 = []
+    for seq in new_seqs:
+        seq_ls = []
+        dx_ccs_ls = []
+        dx_ccs_cat1_ls = []
+        for adm in seq:
+            new_adm = []
+            dx_ccs = []
+            dx_ccs_cat1 = []
+            for dx in adm:
+                dxStr = 'D_' + convert_to_icd9(dx)
+                # dxStr = 'D_' + dx
+                dxStr_ccs_single = 'D_' + label4data.code2single_dx[dx]
+                dxStr_ccs_cat1 = 'D_' + label4data.code2first_level_dx[dx]
+                new_adm.append(dxStr)
+                dx_ccs.append(dxStr_ccs_single)
+                dx_ccs_cat1.append(dxStr_ccs_cat1)
+            seq_ls.append(new_adm)
+            dx_ccs_ls.append(dx_ccs)
+            dx_ccs_cat1_ls.append(dx_ccs_cat1)
+        new_seqs_str.append(seq_ls)
+        adm_dx_ccs.append(dx_ccs_ls)
+        adm_dx_ccs_cat1.append(dx_ccs_cat1_ls)
+
+    print('Converting strSeqs to intSeqs, and making types for ccs single-level code')
+    dict_ccs = {}
+    new_seqs_ccs = []
+    for patient in adm_dx_ccs:
+        new_patient = []
+        for visit in patient:
+            new_visit = []
+            for code in set(visit):
+                if code in dict_ccs:
+                    new_visit.append(dict_ccs[code])
+                else:
+                    dict_ccs[code] = len(dict_ccs)
+                    new_visit.append(dict_ccs[code])
+            new_patient.append(new_visit)
+        new_seqs_ccs.append(new_patient)
+
+    print('Converting strSeqs to intSeqs, and making types for ccs multi-level first level code')
+    dict_ccs_cat1 = {}
+    new_seqs_ccs_cat1 = []
+    for patient in adm_dx_ccs_cat1:
+        new_patient = []
+        for visit in patient:
+            new_visit = []
+            for code in set(visit):
+                if code in dict_ccs_cat1:
+                    new_visit.append(dict_ccs_cat1[code])
+                else:
+                    dict_ccs_cat1[code] = len(dict_ccs_cat1)
+                    new_visit.append(dict_ccs_cat1[code])
+            new_patient.append(new_visit)
+        new_seqs_ccs_cat1.append(new_patient)
+
+    print('Converting strSeqs to intSeqs, and making types')
+    types = {}
+    newSeqs = []
+    for patient in new_seqs_str:
+        newPatient = []
+        for visit in patient:
+            newVisit = []
+            for code in visit:
+                if code in types:
+                    newVisit.append(types[code])
+                else:
+                    types[code] = len(types)
+                    newVisit.append(types[code])
+            newPatient.append(newVisit)
+        newSeqs.append(newPatient)
+
+    pickle.dump(newSeqs, open(out_file + '.seqs', 'wb'), -1)
+    pickle.dump(types, open(out_file + '.types', 'wb'), -1)
+    pickle.dump(new_seqs_ccs_cat1, open(out_file + '.ccs_cat1.seqs', 'wb'), -1)
+    pickle.dump(dict_ccs_cat1, open(out_file + '.ccs_cat1.types', 'wb'), -1)
+    pickle.dump(new_seqs_ccs, open(out_file + '.ccsSingleLevel.seqs', 'wb'), -1)
+    pickle.dump(dict_ccs, open(out_file + '.ccsSingleLevel.types', 'wb'), -1)
+    print(len(newSeqs), len(types), len(dict_ccs_cat1), len(dict_ccs))
+
+
+if __name__ == '__main__':
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_dir",
+                        default=None,
+                        type=str,
+                        required=True,
+                        help="The input data dir.")
+    args = parser.parse_args()
+
+    # dir_path = '../../'
+    dir_path = args.data_dir
     sigle_dx_file = dir_path + 'ccs/ccs_single_dx_tool_2015.csv'
     multi_dx_file = dir_path + 'ccs/ccs_multi_dx_tool_2015.csv'
-    mimic_processing(admissionFile, diagnosisFile, multi_dx_file, sigle_dx_file, outFile)
+
+    # data_source = 'mimic'
+    data_source = 'eicu'
+
+    if data_source == 'mimic':
+        admissionFile = dir_path + 'data/ADMISSIONS.csv'
+        diagnosisFile = dir_path + 'data/DIAGNOSES_ICD.csv'
+        outFile = dir_path + 'outputs/gram/data/mimic/mimic'
+        mimic_processing(admissionFile, diagnosisFile, multi_dx_file, sigle_dx_file, outFile)
+    else:
+        admissionFile = dir_path + 'data/patient.csv'
+        diagnosisFile = dir_path + 'data/diagnosis.csv'
+        outFile = dir_path + 'outputs/gram/data/eicu/eicu'
+        eicu_processing(admissionFile, diagnosisFile, multi_dx_file, sigle_dx_file, outFile)
 

@@ -60,6 +60,11 @@ def main():
                         help="The prediction task, such as Mortality (mort) or Length of stay (los).")
 
     ## Other parameters
+    parser.add_argument("--data_source",
+                        default='mimic',
+                        type=str,
+                        # required=True,
+                        help="the data source: mimic III (mimic) or eICU (eicu).")
     parser.add_argument("--pretrained_dir",
                         default=None,
                         type=str,
@@ -83,6 +88,10 @@ def main():
                         default=5e-5,
                         type=float,
                         help="The initial learning rate for Adam.")
+    parser.add_argument("--lamda",
+                        default=1.0,
+                        type=float,
+                        help="The initial learning rate for Adam.")
     parser.add_argument("--num_train_epochs",
                         default=3.0,
                         type=float,
@@ -103,8 +112,9 @@ def main():
 
     args = parser.parse_args()
 
-    output_dir = os.path.join(args.output_dir, args.task)
-    log_file = os.path.join(output_dir, 'dx_prediction.log')
+    task = args.task + '_lr_' + str(args.learning_rate) + '_bs_' + str(args.train_batch_size)  + \
+           '_e_' + str(args.num_train_epochs) + '_l_' + str(args.lamda)
+    output_dir = os.path.join(args.output_dir, args.data_source, task)
     if os.path.exists(output_dir) and os.listdir(output_dir):
         raise ValueError("Output directory ({}) already exists and is not empty.".format(output_dir))
     os.makedirs(output_dir, exist_ok=True)
@@ -117,14 +127,28 @@ def main():
     print2file(buf, log_file)
 
     data_path = args.data_dir
-    # training data files
-    seqs_file = data_path + 'outputs/kemce/data/seq_prediction/mimic.seqs'
-    labels_file = data_path + 'outputs/kemce/data/seq_prediction/mimic.labels_all.label'
-
-    # dictionary files
-    dict_file = data_path + 'outputs/kemce/data/seq_prediction/mimic.types'
-    tree_file = data_path + 'outputs/kemce/data/seq_prediction/mimic'
-    class_dict_file = data_path + 'outputs/kemce/data/seq_prediction/mimic.ccs_single_level.dict'
+    if args.data_source == 'mimic':
+        # training data files
+        seqs_file = data_path + 'outputs/kemce/data/seq_prediction/mimic.seqs'
+        labels_file = data_path + 'outputs/kemce/data/seq_prediction/mimic.labels_ccs.label'
+        # labels_file = data_path + 'outputs/kemce/data/seq_prediction/mimic.labels_all.label'
+        labels_visit_file = data_path + 'outputs/kemce/data/seq_prediction/mimic.labels_visit_cat1.label'
+        # dictionary files
+        dict_file = data_path + 'outputs/kemce/data/seq_prediction/mimic.types'
+        tree_file = data_path + 'outputs/kemce/data/seq_prediction/mimic'
+        # class_dict_file = data_path + 'outputs/kemce/data/seq_prediction/mimic.3digitICD9.dict'
+        class_dict_file = data_path + 'outputs/kemce/data/seq_prediction/mimic.ccs_single_level.dict'
+        visit_class_dict_file = data_path + 'outputs/kemce/data/seq_prediction/mimic.ccs_cat1.dict'
+    else:
+        # training data files
+        seqs_file = data_path + 'outputs/eICU/seq_prediction/eicu.seqs'
+        labels_file = data_path + 'outputs/eICU/seq_prediction/eicu.labels_ccs.label'
+        labels_visit_file = data_path + 'outputs/eICU/seq_prediction/eicu.labels_visit_cat1.label'
+        # dictionary files
+        dict_file = data_path + 'outputs/eICU/seq_prediction/eicu.types'
+        tree_file = data_path + 'outputs/eICU/seq_prediction/eicu'
+        class_dict_file = data_path + 'outputs/eICU/seq_prediction/eicu.ccs_single_level.dict'
+        visit_class_dict_file = data_path + 'outputs/eICU/seq_prediction/eicu.ccs_cat1.dict'
 
     # model configure file
     config_json = 'dag_code/config.json'
@@ -132,6 +156,7 @@ def main():
 
     inputs = pickle.load(open(seqs_file, 'rb'))
     labels = pickle.load(open(labels_file, 'rb'))
+    labels_visit = pickle.load(open(labels_visit_file, 'rb'))
 
     leaves_list = []
     ancestors_list = []
@@ -151,7 +176,11 @@ def main():
     config.num_tree_nodes = num_tree_nodes
     class_vocab = pickle.load(open(class_dict_file, 'rb'))
     config.num_ccs_classes = len(class_vocab)
+    visit_class_vocab = pickle.load(open(visit_class_dict_file, 'rb'))
+    config.num_visit_classes = len(visit_class_vocab)
+
     config.add_dag = args.add_dag
+    config.lamda = args.lamda
 
     max_seqs_len = 0
     for seq in inputs:
@@ -168,25 +197,28 @@ def main():
 
     # load data
     data_dict = dict()
-    train_set, valid_set, test_set = load_data(inputs, labels)
+    train_set, valid_set, test_set = load_data(inputs, labels, labels_visit)
 
-    train_dataset = FTDataset(train_set[0], train_set[1])
+    train_dataset = FTDataset(train_set[0], train_set[1], train_set[2])
     train_data_loader = DataLoader(train_dataset, batch_size=args.train_batch_size,
-                                   collate_fn=lambda batch: collate_rd(batch, config.num_ccs_classes),
+                                   collate_fn=lambda batch: collate_rd(batch, config.num_ccs_classes,
+                                                                       config.num_visit_classes),
                                    num_workers=0, shuffle=True)
     size_train_data = len(train_set[0])
     num_train_steps = int(size_train_data / args.train_batch_size * args.num_train_epochs)
 
-    val_dataset = FTDataset(valid_set[0], valid_set[1])
+    val_dataset = FTDataset(valid_set[0], valid_set[1], valid_set[2])
     val_data_loader = DataLoader(val_dataset, batch_size=args.train_batch_size,
-                                 collate_fn=lambda batch: collate_rd(batch, config.num_ccs_classes),
+                                 collate_fn=lambda batch: collate_rd(batch, config.num_ccs_classes,
+                                                                     config.num_visit_classes),
                                  num_workers=0, shuffle=True)
     size_val_data = len(valid_set[0])
     num_val_steps = int(size_val_data / args.train_batch_size * args.num_train_epochs)
 
-    test_dataset = FTDataset(test_set[0], test_set[1])
+    test_dataset = FTDataset(test_set[0], test_set[1], test_set[2])
     test_data_loader = DataLoader(test_dataset, batch_size=args.train_batch_size,
-                                  collate_fn=lambda batch: collate_rd(batch, config.num_ccs_classes),
+                                  collate_fn=lambda batch: collate_rd(batch, config.num_ccs_classes,
+                                                                      config.num_visit_classes),
                                   num_workers=0, shuffle=True)
     size_test_data = len(test_set[0])
     num_test_steps = int(size_test_data / args.train_batch_size * args.num_train_epochs)
@@ -244,6 +276,7 @@ def main():
                 visit_mask = batch['visit_mask']
                 code_mask = batch['code_mask']
                 label_task = batch['label_dx']
+                labels_visit = batch['labels_visit']
 
                 optimizer.zero_grad()
 
@@ -255,14 +288,15 @@ def main():
                         loss = model(input_ids,
                                      visit_mask,
                                      code_mask,
-                                     label_task)
+                                     label_task,
+                                     labels_visit)
                         loss.backward()
                         optimizer.step()
 
                         lr_this_step = args.learning_rate * warmup_linear(global_step / num_train_steps, args.warmup_proportion)
                         for param_group in optimizer.param_groups:
                             param_group['lr'] = lr_this_step
-                        optimizer.zero_grad()
+                        # optimizer.zero_grad()
                         global_step += 1
 
                         fout.write("{}\n".format(loss.item()))

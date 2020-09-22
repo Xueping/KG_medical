@@ -190,8 +190,14 @@ if __name__ == '__main__':
 
     dir_path = '../../../'
     infile = dir_path + 'ccs/ccs_multi_dx_tool_2015.csv'
-    seqFile = dir_path + 'outputs/kemce/data/seq_prediction/mimic.inputs_all.seqs'
-    typeFile = dir_path + 'outputs/kemce/data/seq_prediction/mimic.vocab.txt'
-    outFile = dir_path + 'outputs/kemce/data/seq_prediction/mimic'
+    # for MIMIC III dataset
+    # seqFile = dir_path + 'outputs/kemce/data/seq_prediction/mimic.inputs_all.seqs'
+    # typeFile = dir_path + 'outputs/kemce/data/seq_prediction/mimic.vocab.txt'
+    # outFile = dir_path + 'outputs/kemce/data/seq_prediction/mimic'
+
+    #for eICU dataset
+    seqFile = dir_path + 'outputs/eICU/seq_prediction/eicu.inputs_all.seqs'
+    typeFile = dir_path + 'outputs/eICU/seq_prediction/eicu.vocab.txt'
+    outFile = dir_path + 'outputs/eICU/seq_prediction/eicu'
 
     mimic_tree_building(seqFile, typeFile, infile, outFile)

@@ -1,4 +1,5 @@
 import pickle
+import argparse
 
 
 def mimic_tree_building(seqs_file, types_file, graph_file, out_file):
@@ -66,7 +67,7 @@ def mimic_tree_building(seqs_file, types_file, graph_file, out_file):
     rootCode = types['A_ROOT']
 
     missSet = startSet - set(hitList)
-    missSet.remove('PAD')  # comment this line for GRAM and KAME, work for KEMCE
+    # missSet.remove('PAD')  # comment this line for GRAM and KAME, work for KEMCE
 
     fiveMap = {}
     fourMap = {}
@@ -80,7 +81,7 @@ def mimic_tree_building(seqs_file, types_file, graph_file, out_file):
     anc_TwoMap = {}
     anc_OneMap = {}
 
-    infd = open(infile, 'r')
+    infd = open(graph_file, 'r')
     infd.readline()
 
     for line in infd:
@@ -187,36 +188,46 @@ def mimic_tree_building(seqs_file, types_file, graph_file, out_file):
             newPatient.append(newVisit)
         newSeqs.append(newPatient)
 
-    pickle.dump(newFiveMap, open(outFile + '.level5.pk', 'wb'), -1)
-    pickle.dump(newFourMap, open(outFile + '.level4.pk', 'wb'), -1)
-    pickle.dump(newThreeMap, open(outFile + '.level3.pk', 'wb'), -1)
-    pickle.dump(newTwoMap, open(outFile + '.level2.pk', 'wb'), -1)
-    pickle.dump(newOneMap, open(outFile + '.level1.pk', 'wb'), -1)
+    pickle.dump(newFiveMap, open(out_file + '.level5.pk', 'wb'), -1)
+    pickle.dump(newFourMap, open(out_file + '.level4.pk', 'wb'), -1)
+    pickle.dump(newThreeMap, open(out_file + '.level3.pk', 'wb'), -1)
+    pickle.dump(newTwoMap, open(out_file + '.level2.pk', 'wb'), -1)
+    pickle.dump(newOneMap, open(out_file + '.level1.pk', 'wb'), -1)
 
-    pickle.dump(anc_FourMap, open(outFile + '.a_level4.pk', 'wb'), -1)
-    pickle.dump(anc_ThreeMap, open(outFile + '.a_level3.pk', 'wb'), -1)
-    pickle.dump(anc_TwoMap, open(outFile + '.a_level2.pk', 'wb'), -1)
-    pickle.dump(anc_OneMap, open(outFile + '.a_level1.pk', 'wb'), -1)
+    pickle.dump(anc_FourMap, open(out_file + '.a_level4.pk', 'wb'), -1)
+    pickle.dump(anc_ThreeMap, open(out_file + '.a_level3.pk', 'wb'), -1)
+    pickle.dump(anc_TwoMap, open(out_file + '.a_level2.pk', 'wb'), -1)
+    pickle.dump(anc_OneMap, open(out_file + '.a_level1.pk', 'wb'), -1)
 
-    pickle.dump(newTypes, open(outFile + '.types', 'wb'), -1)
-    pickle.dump(newSeqs, open(outFile + '.seqs', 'wb'), -1)
+    pickle.dump(newTypes, open(out_file + '_new.types', 'wb'), -1)
+    pickle.dump(newSeqs, open(out_file + '_new.seqs', 'wb'), -1)
     print(len(newTypes), len(newSeqs))
 
 
 if __name__ == '__main__':
 
-    dir_path = '../../'
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_dir",
+                        default=None,
+                        type=str,
+                        required=True,
+                        help="The input data dir.")
+    args = parser.parse_args()
+
+    # dir_path = '../../'
+    dir_path = args.data_dir
     infile = dir_path + 'ccs/ccs_multi_dx_tool_2015.csv'
-    # seqFile = dir_path + 'outputs/gram/data/mimic.seqs'
-    # typeFile = dir_path + 'outputs/gram/data/mimic.types'
-    # outFile = dir_path + 'outputs/gram/data/mimic'
 
-    # seqFile = dir_path + 'outputs/kame/data/mimic.seqs'
-    # typeFile = dir_path + 'outputs/kame/data/mimic.types'
-    # outFile = dir_path + 'outputs/kame/data/mimic'
+    # data_source = 'mimic'
+    data_source = 'eicu'
 
-    seqFile = dir_path + 'outputs/kemce/data/mimic/mimic.seqs'
-    typeFile = dir_path + 'outputs/kemce/data/mimic/mimic.types'
-    outFile = dir_path + 'outputs/kemce/data/mimic/mimic'
+    if data_source == 'mimic':
+        seqFile = dir_path + 'outputs/gram/data/mimic/mimic.seqs'
+        typeFile = dir_path + 'outputs/gram/data/mimic/mimic.types'
+        outFile = dir_path + 'outputs/gram/data/mimic/mimic'
+    else:
+        seqFile = dir_path + 'outputs/gram/data/eicu/eicu.seqs'
+        typeFile = dir_path + 'outputs/gram/data/eicu/eicu.types'
+        outFile = dir_path + 'outputs/gram/data/eicu/eicu'
 
     mimic_tree_building(seqFile, typeFile, infile, outFile)

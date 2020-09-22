@@ -15,7 +15,7 @@ def pad2d(x, max_len):
     return np.concatenate([x, pad])
 
 
-def collate_rd(batch, num_dx_classes):
+def collate_rd(batch, num_dx_classes, num_visit_classes):
 
     seq_lens = [len(x[0]) for x in batch]
     max_seq_len = max(seq_lens)
@@ -48,27 +48,44 @@ def collate_rd(batch, num_dx_classes):
 
     code_mask = np.array(inputs > 0, dtype=np.float32)
 
-    readmission_label_ls = [x[1][0] for x in batch]
-    readmission_label = np.stack(readmission_label_ls)
+    # readmission_label_ls = [x[1][0] for x in batch]
+    # readmission_label = np.stack(readmission_label_ls)
 
     dx_classes = []
     for x in batch:
-        dx_label = x[1][2]
+        dx_label = x[1]
+        # dx_label = x[1][1]
         labels = np.zeros(num_dx_classes, dtype=np.float32)
         labels[dx_label] = 1.0
         dx_classes.append(labels)
     labels_dx = np.stack(dx_classes)
 
+    visit_classes_pad = []
+    for x in batch:
+        visit_labels = x[2]
+        visit_classes = []
+        for visit_label in visit_labels:
+            # print(visit_label)
+            labels = np.zeros(num_visit_classes, dtype=np.float32)
+            labels[visit_label] = 1.0
+            visit_classes.append(labels)
+        for _ in range(max_seq_len - len(visit_labels)):
+            labels = np.zeros(num_visit_classes, dtype=np.float32)
+            visit_classes.append(labels)
+        visit_classes_pad.append(visit_classes)
+    labels_visit = np.stack(visit_classes_pad)
+
     output = {"input": torch.tensor(inputs).long(),
               "visit_mask": torch.tensor(visit_mask),
               "code_mask": torch.tensor(code_mask),
               "label_dx": torch.tensor(labels_dx),
-              "label_readm": torch.tensor(readmission_label)
+              # "label_readm": torch.tensor(readmission_label),
+              'labels_visit': torch.tensor(labels_visit)
               }
     return output
 
 
-def load_data(sequences, labels):
+def load_data(sequences, labels, labels_current_visit):
 
     data_size = len(labels)
     ind = np.random.permutation(data_size)
@@ -81,10 +98,15 @@ def load_data(sequences, labels):
 
     train_set_x = [sequences[i] for i in train_indices]
     train_set_y = [labels[i] for i in train_indices]
+    train_set_y_visit = [labels_current_visit[i] for i in train_indices]
+
     test_set_x = [sequences[i] for i in test_indices]
     test_set_y = [labels[i] for i in test_indices]
+    test_set_y_visit = [labels_current_visit[i] for i in test_indices]
+
     valid_set_x = [sequences[i] for i in valid_indices]
     valid_set_y = [labels[i] for i in valid_indices]
+    valid_set_y_visit = [labels_current_visit[i] for i in valid_indices]
 
     def len_argsort(seq):
         return sorted(range(len(seq)), key=lambda x: len(seq[x]))
@@ -92,32 +114,36 @@ def load_data(sequences, labels):
     train_sorted_index = len_argsort(train_set_x)
     train_set_x = [train_set_x[i] for i in train_sorted_index]
     train_set_y = [train_set_y[i] for i in train_sorted_index]
+    train_set_y_visit = [train_set_y_visit[i] for i in train_sorted_index]
 
     valid_sorted_index = len_argsort(valid_set_x)
     valid_set_x = [valid_set_x[i] for i in valid_sorted_index]
     valid_set_y = [valid_set_y[i] for i in valid_sorted_index]
+    valid_set_y_visit = [valid_set_y_visit[i] for i in valid_sorted_index]
 
     test_sorted_index = len_argsort(test_set_x)
     test_set_x = [test_set_x[i] for i in test_sorted_index]
     test_set_y = [test_set_y[i] for i in test_sorted_index]
+    test_set_y_visit = [test_set_y_visit[i] for i in test_sorted_index]
 
-    train_set = (train_set_x, train_set_y)
-    valid_set = (valid_set_x, valid_set_y)
-    test_set = (test_set_x, test_set_y)
+    train_set = (train_set_x, train_set_y, train_set_y_visit)
+    valid_set = (valid_set_x, valid_set_y, valid_set_y_visit)
+    test_set = (test_set_x, test_set_y, test_set_y_visit)
 
     return train_set, valid_set, test_set
 
 
 class FTDataset(Dataset):
-    def __init__(self, inputs, labels):
+    def __init__(self, inputs, labels, labels_visit):
         self.inputs = inputs
         self.labels = labels
+        self.labels_visit = labels_visit
 
     def __len__(self):
         return len(self.inputs)
 
     def __getitem__(self, item):
-        return self.inputs[item], self.labels[item]
+        return self.inputs[item], self.labels[item], self.labels_visit[item]
 
 
 # if __name__ == '__main__':
