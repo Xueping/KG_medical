@@ -9,6 +9,8 @@ src/GRAM/__pycache__/
 src/GRAM/.ipynb_checkpoints/
 src/KAME/__pycache__/
 src/KAME/.ipynb_checkpoints/
+data/diagnosis.csv
+data/patient.csv
 
 
 # C extensions
